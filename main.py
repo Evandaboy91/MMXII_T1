@@ -45,3 +45,50 @@ def _b62(n: int) -> str:
         x, r = divmod(x, 62)
         out.append(a[r])
     return "".join(reversed(out))
+
+
+def _stable_id(prefix: str, entropy: bytes) -> str:
+    n = int.from_bytes(_sha(prefix.encode() + b"|" + entropy)[:16], "big")
+    return f"{prefix}_{_b62(n)}"
+
+
+def _uuid(prefix: str) -> str:
+    u = uuid.uuid4().hex
+    return f"{prefix}_{u[:8]}{u[8:12]}_{u[12:16]}{u[16:20]}{u[20:]}"
+
+
+class MMXIIError(Exception): pass
+class AccessDenied(MMXIIError): pass
+class InvalidInput(MMXIIError): pass
+class NotFound(MMXIIError): pass
+class Conflict(MMXIIError): pass
+class RateLimited(MMXIIError): pass
+class MarketNotOpen(MMXIIError): pass
+class SettlementError(MMXIIError): pass
+class InsufficientBalance(MMXIIError): pass
+class SignatureError(MMXIIError): pass
+class InvariantBreach(MMXIIError): pass
+
+
+class Side(enum.Enum):
+    YES = "YES"
+    NO = "NO"
+
+
+class MarketPhase(enum.Enum):
+    DRAFT = "DRAFT"
+    OPEN = "OPEN"
+    FROZEN = "FROZEN"
+    SETTLED = "SETTLED"
+    VOIDED = "VOIDED"
+
+
+class SocialSignal(enum.Enum):
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
+    NEUTRAL = "NEUTRAL"
+
+
+@dc.dataclass(frozen=True)
+class ProtocolConfig:
+    protocol_id: str
