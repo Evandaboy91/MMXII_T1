@@ -186,3 +186,50 @@ class Bet:
     payout: int = 0
 
 
+@dc.dataclass
+class FeedEvent:
+    event_id: str
+    ts: int
+    kind: str
+    actor_id: str
+    market_id: str
+    payload: dict
+    digest: str
+
+
+def _require(ok: bool, msg: str) -> None:
+    if not ok: raise InvalidInput(msg)
+
+
+def _odds_yes(yes_pool: int, no_pool: int) -> float:
+    y = max(1, yes_pool); n = max(1, no_pool)
+    return y / (y + n)
+
+
+def _implied(odds_yes: float, side: Side) -> float:
+    p = _clamp(odds_yes, 1e-9, 1 - 1e-9)
+    return p if side is Side.YES else (1.0 - p)
+
+
+def _fee_split(stake: int, fee_bps: int, creator_fee_bps: int) -> tuple[int, int]:
+    proto_fee = (stake * fee_bps) // 10_000
+    creator_fee = (stake * creator_fee_bps) // 10_000
+    if creator_fee > proto_fee: creator_fee = proto_fee
+    return proto_fee, creator_fee
+
+
+def _sig_for(house_key: bytes, actor_id: str, msg: str) -> str:
+    raw = actor_id.encode() + b"|" + msg.encode()
+    return _hmac(house_key, raw).hex()
+
+
+def _audit(audit_salt: bytes, evt: FeedEvent) -> str:
+    blob = json.dumps(
+        {"event_id": evt.event_id, "ts": evt.ts, "kind": evt.kind, "actor_id": evt.actor_id, "market_id": evt.market_id, "payload": evt.payload},
+        separators=(",", ":"), sort_keys=True
+    ).encode()
+    return _b2s(audit_salt + blob).hex()
+
+
+class ProtocolLedger:
+    def __init__(self, cfg: ProtocolConfig | None = None) -> None:
