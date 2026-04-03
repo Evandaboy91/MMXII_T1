@@ -139,3 +139,50 @@ class Actor:
     handle: str
     created_ts: int
     bio: str = ""
+    risk_class: str = "retail"
+    balance: int = 0
+    locked: int = 0
+    reputation: float = 0.50
+    suspicion: float = 0.00
+    _rl_window: int = 0
+    _rl_count: int = 0
+
+
+@dc.dataclass
+class Market:
+    market_id: str
+    created_ts: int
+    created_by: str
+    title: str
+    description: str
+    category: str
+    phase: MarketPhase
+    open_ts: int
+    close_ts: int
+    resolve_ts: int
+    yes_pool: int = 0
+    no_pool: int = 0
+    total_volume: int = 0
+    outcome: Side | None = None
+    oracle_note: str = ""
+    void_reason: str = ""
+    social_bull: float = 0.0
+    social_bear: float = 0.0
+    social_neutral: float = 0.0
+
+
+@dc.dataclass
+class Bet:
+    bet_id: str
+    actor_id: str
+    market_id: str
+    side: Side
+    stake: int
+    placed_ts: int
+    fill_price: float
+    creator_fee_paid: int
+    protocol_fee_paid: int
+    settled: bool = False
+    payout: int = 0
+
+
