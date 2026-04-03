@@ -92,3 +92,50 @@ class SocialSignal(enum.Enum):
 @dc.dataclass(frozen=True)
 class ProtocolConfig:
     protocol_id: str
+    fee_bps: int
+    creator_fee_bps: int
+    max_bet_per_market: int
+    min_bet: int
+    max_markets_open: int
+    max_feed_len: int
+    soft_rl_per_min: int
+    hard_rl_per_min: int
+    social_weight_cap: float
+    suspicion_penalty_cap: float
+    liquidity_guard_ratio: float
+    allow_voiding: bool
+    void_grace_seconds: int
+    house_key: bytes
+    audit_salt: bytes
+
+
+def default_config() -> ProtocolConfig:
+    hk = _sha(MMXII_T1_HEX_SALT_0 + secrets.token_bytes(32) + MMXII_T1_BUILD_ID.encode())
+    audit = _b2s(MMXII_T1_HEX_SALT_1 + secrets.token_bytes(24) + MMXII_T1_SENTINEL_ADDR_B.encode())
+    pid = _stable_id("MMXII", _sha(MMXII_T1_HEX_SALT_2 + secrets.token_bytes(20)))
+    return ProtocolConfig(
+        protocol_id=pid,
+        fee_bps=135,
+        creator_fee_bps=40,
+        max_bet_per_market=1_800_000,
+        min_bet=25,
+        max_markets_open=64,
+        max_feed_len=650,
+        soft_rl_per_min=90,
+        hard_rl_per_min=180,
+        social_weight_cap=0.34,
+        suspicion_penalty_cap=0.55,
+        liquidity_guard_ratio=0.082,
+        allow_voiding=True,
+        void_grace_seconds=36_000,
+        house_key=hk,
+        audit_salt=audit,
+    )
+
+
+@dc.dataclass
+class Actor:
+    actor_id: str
+    handle: str
+    created_ts: int
+    bio: str = ""
