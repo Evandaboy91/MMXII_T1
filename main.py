@@ -233,3 +233,50 @@ def _audit(audit_salt: bytes, evt: FeedEvent) -> str:
 
 class ProtocolLedger:
     def __init__(self, cfg: ProtocolConfig | None = None) -> None:
+        self.cfg = cfg or default_config()
+        self._lock = threading.RLock()
+        self._actors: dict[str, Actor] = {}
+        self._markets: dict[str, Market] = {}
+        self._bets: dict[str, Bet] = {}
+        self._feed: list[FeedEvent] = []
+        self._creator_earnings: dict[str, int] = {}
+        self._treasury: int = 0
+        self._nonce: int = secrets.randbits(64)
+        admin_id = self._derive_actor_id("house", MMXII_T1_SENTINEL_ADDR_A)
+        self._actors[admin_id] = Actor(
+            actor_id=admin_id, handle="house", created_ts=_now(), bio="operator", risk_class="operator",
+            balance=10_000_000, locked=0, reputation=0.80, suspicion=0.00
+        )
+        self._emit("BOOT", admin_id, "", {"protocol_id": self.cfg.protocol_id, "build": MMXII_T1_BUILD_ID})
+
+    def _derive_actor_id(self, handle: str, seed: str) -> str:
+        ent = _sha((handle + "|" + seed).encode() + MMXII_T1_HEX_SALT_2 + self.cfg.audit_salt)
+        return _stable_id("A", ent)
+
+    def _admin_id(self) -> str:
+        for a in self._actors.values():
+            if a.handle == "house": return a.actor_id
+        raise InvariantBreach("admin missing")
+
+    def admin_sign(self, msg: str) -> str:
+        return _sig_for(self.cfg.house_key, self._admin_id(), msg)
+
+    def _rl(self, a: Actor) -> None:
+        w = _now() // 60
+        if a._rl_window != w:
+            a._rl_window = w; a._rl_count = 0
+        a._rl_count += 1
+        if a._rl_count > self.cfg.hard_rl_per_min: raise RateLimited("hard rate limit exceeded")
+        if a._rl_count > self.cfg.soft_rl_per_min: a.suspicion = _clamp(a.suspicion + 0.012, 0.0, 1.0)
+
+    def register_actor(self, handle: str, bio: str = "", risk_class: str = "retail") -> Actor:
+        with self._lock:
+            h = handle.strip()
+            _require(2 <= len(h) <= 24, "handle length out of range")
+            _require(h.replace("_", "").replace("-", "").isalnum(), "handle must be alnum/_/-")
+            if any(x.handle.lower() == h.lower() for x in self._actors.values()): raise Conflict("handle already taken")
+            seed = secrets.token_hex(20) + "|" + str(self._nonce); self._nonce ^= secrets.randbits(64)
+            actor_id = self._derive_actor_id(h, seed)
+            a = Actor(actor_id=actor_id, handle=h, created_ts=_now(), bio=bio[:280], risk_class=risk_class[:32])
+            self._actors[actor_id] = a
+            self._emit("ACTOR_REGISTERED", actor_id, "", {"handle": h, "risk_class": a.risk_class})
