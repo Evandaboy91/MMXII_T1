@@ -327,3 +327,50 @@ class ProtocolLedger:
             open_ts = now + int(open_in); close_ts = now + int(close_in); resolve_ts = now + int(resolve_in)
             _require(open_ts >= now, "open must be >= now")
             _require(close_ts > open_ts, "close must be after open")
+            _require(resolve_ts >= close_ts, "resolve must be >= close")
+            ent = secrets.token_bytes(16) + self.cfg.audit_salt + title.strip().encode()
+            market_id = _stable_id("M", _sha(ent))
+            if market_id in self._markets: market_id = _uuid("M")
+            m = Market(
+                market_id=market_id, created_ts=now, created_by=creator_id, title=title.strip(), description=description.strip(),
+                category=category.strip().lower(), phase=MarketPhase.DRAFT, open_ts=open_ts, close_ts=close_ts, resolve_ts=resolve_ts
+            )
+            self._markets[market_id] = m
+            self._creator_earnings.setdefault(creator_id, 0)
+            self._emit("MARKET_CREATED", creator_id, market_id, {"title": m.title, "category": m.category, "open_ts": open_ts, "close_ts": close_ts, "resolve_ts": resolve_ts})
+            return dc.replace(m)
+
+    def open_market(self, actor_id: str, market_id: str) -> Market:
+        with self._lock:
+            if actor_id not in self._actors: raise NotFound("actor not found")
+            a = self._actors[actor_id]; self._rl(a)
+            if market_id not in self._markets: raise NotFound("market not found")
+            m = self._markets[market_id]
+            if m.phase != MarketPhase.DRAFT: raise Conflict("market not in draft")
+            if _now() < m.open_ts: raise MarketNotOpen("cannot open before open_ts")
+            m.phase = MarketPhase.OPEN
+            seed = 220 + (int.from_bytes(_sha(m.market_id.encode())[:2], "big") % 370)
+            m.yes_pool += seed; m.no_pool += seed
+            self._emit("MARKET_OPENED", actor_id, market_id, {"seed": seed, "yes_pool": m.yes_pool, "no_pool": m.no_pool})
+            return dc.replace(m)
+
+    def freeze_market(self, admin_id: str, market_id: str, note: str, admin_sig: str) -> Market:
+        with self._lock:
+            if admin_id != self._admin_id(): raise AccessDenied("only admin")
+            if market_id not in self._markets: raise NotFound("market not found")
+            msg = f"freeze|{market_id}|{note[:64]}"
+            if _sig_for(self.cfg.house_key, admin_id, msg) != admin_sig: raise SignatureError("invalid admin signature")
+            m = self._markets[market_id]
+            if m.phase != MarketPhase.OPEN: raise Conflict("can only freeze open markets")
+            m.phase = MarketPhase.FROZEN
+            self._emit("MARKET_FROZEN", admin_id, market_id, {"note": note[:280]})
+            return dc.replace(m)
+
+    def list_markets(self, phase: MarketPhase | None = None, limit: int = 50) -> list[Market]:
+        with self._lock:
+            xs = list(self._markets.values())
+            if phase is not None: xs = [m for m in xs if m.phase == phase]
+            xs.sort(key=lambda m: (m.created_ts, m.market_id), reverse=True)
+            return [dc.replace(m) for m in xs[: max(1, min(500, int(limit)))]]
+
+    def market(self, market_id: str) -> Market:
