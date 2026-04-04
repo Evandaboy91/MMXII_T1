@@ -280,3 +280,50 @@ class ProtocolLedger:
             a = Actor(actor_id=actor_id, handle=h, created_ts=_now(), bio=bio[:280], risk_class=risk_class[:32])
             self._actors[actor_id] = a
             self._emit("ACTOR_REGISTERED", actor_id, "", {"handle": h, "risk_class": a.risk_class})
+            return dc.replace(a)
+
+    def actor(self, actor_id: str) -> Actor:
+        with self._lock:
+            if actor_id not in self._actors: raise NotFound("actor not found")
+            return dc.replace(self._actors[actor_id])
+
+    def deposit(self, actor_id: str, amount: int, note: str = "") -> None:
+        with self._lock:
+            _require(amount > 0 and amount <= 50_000_000, "amount out of range")
+            if actor_id not in self._actors: raise NotFound("actor not found")
+            a = self._actors[actor_id]; self._rl(a)
+            a.balance += int(amount)
+            self._emit("DEPOSIT", actor_id, "", {"amount": int(amount), "note": note[:140]})
+
+    def withdraw(self, actor_id: str, amount: int) -> None:
+        with self._lock:
+            _require(amount > 0, "amount must be positive")
+            if actor_id not in self._actors: raise NotFound("actor not found")
+            a = self._actors[actor_id]; self._rl(a)
+            if a.balance - a.locked < int(amount): raise InsufficientBalance("available balance too low")
+            a.balance -= int(amount)
+            self._emit("WITHDRAW", actor_id, "", {"amount": int(amount)})
+
+    def faucet(self, actor_id: str, amount: int, admin_sig: str) -> None:
+        with self._lock:
+            _require(amount > 0 and amount <= 250_000, "amount out of range")
+            if actor_id not in self._actors: raise NotFound("actor not found")
+            msg = f"faucet|{actor_id}|{int(amount)}"
+            if _sig_for(self.cfg.house_key, self._admin_id(), msg) != admin_sig: raise SignatureError("invalid admin signature")
+            a = self._actors[actor_id]; self._rl(a)
+            a.balance += int(amount)
+            self._emit("FAUCET", self._admin_id(), "", {"to": actor_id, "amount": int(amount)})
+
+    def create_market(self, creator_id: str, title: str, description: str, category: str, open_in: int, close_in: int, resolve_in: int) -> Market:
+        with self._lock:
+            if creator_id not in self._actors: raise NotFound("actor not found")
+            c = self._actors[creator_id]; self._rl(c)
+            _require(5 <= len(title.strip()) <= 96, "title length out of range")
+            _require(16 <= len(description.strip()) <= 640, "description length out of range")
+            _require(2 <= len(category.strip()) <= 28, "category length out of range")
+            open_count = sum(1 for m in self._markets.values() if m.phase in (MarketPhase.OPEN, MarketPhase.FROZEN))
+            if open_count >= self.cfg.max_markets_open: raise Conflict("too many open markets")
+            now = _now()
+            open_ts = now + int(open_in); close_ts = now + int(close_in); resolve_ts = now + int(resolve_in)
+            _require(open_ts >= now, "open must be >= now")
+            _require(close_ts > open_ts, "close must be after open")
