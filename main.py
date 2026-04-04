@@ -374,3 +374,50 @@ class ProtocolLedger:
             return [dc.replace(m) for m in xs[: max(1, min(500, int(limit)))]]
 
     def market(self, market_id: str) -> Market:
+        with self._lock:
+            if market_id not in self._markets: raise NotFound("market not found")
+            return dc.replace(self._markets[market_id])
+
+    def _market_live(self, m: Market) -> None:
+        if m.phase != MarketPhase.OPEN: raise MarketNotOpen("market not open")
+        if _now() >= m.close_ts: raise MarketNotOpen("market closed")
+
+    def _liquidity_guard(self, m: Market, stake: int) -> None:
+        total_pool = m.yes_pool + m.no_pool
+        guard = max(1, int(self.cfg.liquidity_guard_ratio * max(1, total_pool)))
+        if stake > max(guard * 12, self.cfg.max_bet_per_market): raise InvalidInput("stake violates liquidity guard")
+
+    def _classify(self, insight: str) -> SocialSignal:
+        txt = (insight or "").strip().lower()
+        if not txt: return SocialSignal.NEUTRAL
+        score = 0.0
+        for w in ("up", "breakout", "bull", "surge", "ath", "strong", "buy", "green", "momentum"):
+            if w in txt: score += 1.35
+        for w in ("down", "rug", "bear", "dump", "weak", "sell", "red", "fade", "scam"):
+            if w in txt: score -= 1.25
+        h = int.from_bytes(_sha(txt.encode() + MMXII_T1_HEX_SALT_0)[:2], "big")
+        score += 0.55 * (((h % 997) / 997.0) - 0.5)
+        if score > 0.55: return SocialSignal.BULLISH
+        if score < -0.55: return SocialSignal.BEARISH
+        return SocialSignal.NEUTRAL
+
+    def _social_weight(self, a: Actor) -> float:
+        base = 0.08 + 0.35 * a.reputation
+        pen = _clamp(a.suspicion, 0.0, self.cfg.suspicion_penalty_cap)
+        return _clamp(base * (1.0 - pen), 0.0, self.cfg.social_weight_cap)
+
+    def place_bet(self, actor_id: str, market_id: str, side: Side, stake: int, insight: str = "") -> Bet:
+        with self._lock:
+            if actor_id not in self._actors: raise NotFound("actor not found")
+            if market_id not in self._markets: raise NotFound("market not found")
+            if not isinstance(side, Side): raise InvalidInput("side invalid")
+            if not isinstance(stake, int): raise InvalidInput("stake must be int")
+            if stake < self.cfg.min_bet: raise InvalidInput("stake too small")
+            if stake > self.cfg.max_bet_per_market: raise InvalidInput("stake too large")
+            a = self._actors[actor_id]; self._rl(a)
+            m = self._markets[market_id]
+            self._market_live(m); self._liquidity_guard(m, stake)
+            if a.balance - a.locked < stake: raise InsufficientBalance("not enough available balance")
+            odds_yes = _odds_yes(m.yes_pool, m.no_pool)
+            fill_price = float(_implied(odds_yes, side))
+            proto_fee, creator_fee = _fee_split(stake, self.cfg.fee_bps, self.cfg.creator_fee_bps)
