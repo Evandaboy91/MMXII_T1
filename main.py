@@ -421,3 +421,50 @@ class ProtocolLedger:
             odds_yes = _odds_yes(m.yes_pool, m.no_pool)
             fill_price = float(_implied(odds_yes, side))
             proto_fee, creator_fee = _fee_split(stake, self.cfg.fee_bps, self.cfg.creator_fee_bps)
+            stake_net = stake - proto_fee
+            a.locked += stake
+            if side is Side.YES: m.yes_pool += stake_net
+            else: m.no_pool += stake_net
+            m.total_volume += stake
+            self._treasury += (proto_fee - creator_fee)
+            self._creator_earnings[m.created_by] = self._creator_earnings.get(m.created_by, 0) + creator_fee
+            sig = self._classify(insight); w = self._social_weight(a)
+            if sig is SocialSignal.BULLISH: m.social_bull = _clamp(m.social_bull + w, 0.0, 1.0)
+            elif sig is SocialSignal.BEARISH: m.social_bear = _clamp(m.social_bear + w, 0.0, 1.0)
+            else: m.social_neutral = _clamp(m.social_neutral + 0.4 * w, 0.0, 1.0)
+            bet_id = _stable_id("B", _sha(secrets.token_bytes(12) + actor_id.encode() + market_id.encode()))
+            if bet_id in self._bets: bet_id = _uuid("B")
+            b = Bet(
+                bet_id=bet_id, actor_id=actor_id, market_id=market_id, side=side, stake=stake, placed_ts=_now(),
+                fill_price=fill_price, creator_fee_paid=creator_fee, protocol_fee_paid=(proto_fee - creator_fee)
+            )
+            self._bets[bet_id] = b
+            self._emit("BET_PLACED", actor_id, market_id, {"bet_id": bet_id, "side": side.value, "stake": stake, "fill_price": round(fill_price, 8), "proto_fee": proto_fee, "creator_fee": creator_fee, "signal": sig.value, "insight": (insight or "")[:200]})
+            return dc.replace(b)
+
+    def settle_market(self, admin_id: str, market_id: str, outcome: Side | None, oracle_note: str, admin_sig: str) -> Market:
+        with self._lock:
+            if admin_id != self._admin_id(): raise AccessDenied("only admin")
+            if market_id not in self._markets: raise NotFound("market not found")
+            m = self._markets[market_id]
+            if m.phase not in (MarketPhase.OPEN, MarketPhase.FROZEN): raise Conflict("bad market phase")
+            if _now() < m.close_ts: raise SettlementError("cannot settle before close_ts")
+            msg = f"settle|{market_id}|{(outcome.value if outcome else 'VOID')}|{oracle_note[:64]}"
+            if _sig_for(self.cfg.house_key, admin_id, msg) != admin_sig: raise SignatureError("invalid admin signature")
+            if outcome is None:
+                if not self.cfg.allow_voiding: raise SettlementError("voiding disabled")
+                if _now() > m.resolve_ts + self.cfg.void_grace_seconds: raise SettlementError("void window expired")
+                m.phase = MarketPhase.VOIDED; m.outcome = None; m.void_reason = (oracle_note or "voided")[:280]
+                self._refund_all(market_id, m.void_reason)
+                self._emit("MARKET_VOIDED", admin_id, market_id, {"reason": m.void_reason})
+                return dc.replace(m)
+            if not isinstance(outcome, Side): raise InvalidInput("outcome invalid")
+            m.phase = MarketPhase.SETTLED; m.outcome = outcome; m.oracle_note = (oracle_note or "")[:280]
+            self._payout_all(market_id, outcome)
+            self._emit("MARKET_SETTLED", admin_id, market_id, {"outcome": outcome.value, "note": m.oracle_note})
+            return dc.replace(m)
+
+    def _refund_all(self, market_id: str, reason: str) -> None:
+        m = self._markets[market_id]
+        for b in self._bets.values():
+            if b.market_id != market_id or b.settled: continue
