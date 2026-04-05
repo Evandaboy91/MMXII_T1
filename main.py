@@ -515,3 +515,50 @@ class ProtocolLedger:
                 b.payout = 0; b.settled = True
                 chase = 1.0 if b.stake > int(0.18 * (a.balance + 1)) else 0.0
                 a.suspicion = _clamp(a.suspicion + 0.010 + 0.006 * chase, 0.0, 1.0)
+                a.reputation = _clamp(a.reputation - 0.010, 0.0, 1.0)
+                self._emit("BET_LOST", b.actor_id, market_id, {"bet_id": b.bet_id, "stake": b.stake})
+
+    def creator_earnings(self, creator_id: str) -> int:
+        with self._lock:
+            return int(self._creator_earnings.get(creator_id, 0))
+
+    def claim_creator_earnings(self, creator_id: str) -> int:
+        with self._lock:
+            if creator_id not in self._actors: raise NotFound("actor not found")
+            a = self._actors[creator_id]; self._rl(a)
+            amt = int(self._creator_earnings.get(creator_id, 0))
+            if amt <= 0: return 0
+            self._creator_earnings[creator_id] = 0
+            a.balance += amt
+            self._emit("CREATOR_CLAIM", creator_id, "", {"amount": amt})
+            return amt
+
+    def market_insights(self, market_id: str) -> dict:
+        with self._lock:
+            if market_id not in self._markets: raise NotFound("market not found")
+            m = self._markets[market_id]
+            oy = float(_odds_yes(m.yes_pool, m.no_pool))
+            tilt = _clamp((m.social_bull - m.social_bear) * (1.0 - 0.35 * m.social_neutral), -1.0, 1.0)
+            stakes = [b.stake for b in self._bets.values() if b.market_id == market_id]
+            if len(stakes) >= 4: vol = statistics.pstdev(stakes) / max(1.0, statistics.mean(stakes))
+            elif len(stakes) >= 2: vol = (max(stakes) - min(stakes)) / max(1.0, sum(stakes) / len(stakes))
+            else: vol = 0.0
+            vol = float(_clamp(vol, 0.0, 2.5))
+            return {
+                "market_id": m.market_id, "phase": m.phase.value,
+                "p_yes": round(oy, 6), "p_no": round(1.0 - oy, 6),
+                "social": {"bull": round(m.social_bull, 5), "bear": round(m.social_bear, 5), "neutral": round(m.social_neutral, 5), "tilt": round(tilt, 5)},
+                "liquidity": {"yes_pool": m.yes_pool, "no_pool": m.no_pool, "total_pool": (m.yes_pool + m.no_pool), "volume": m.total_volume},
+                "risk": {"volatility_proxy": round(vol, 6), "guard_ratio": self.cfg.liquidity_guard_ratio},
+                "clock": {"open_ts": m.open_ts, "close_ts": m.close_ts, "resolve_ts": m.resolve_ts, "now_ts": _now()},
+            }
+
+    def leaderboard(self, limit: int = 15) -> list[dict]:
+        with self._lock:
+            xs = [a for a in self._actors.values() if a.handle != "house"]
+            scored: list[tuple[float, Actor]] = []
+            for a in xs:
+                wealth = math.log10(max(1.0, float(a.balance)))
+                score = (1.8 * a.reputation) + (0.35 * wealth) - (0.9 * a.suspicion)
+                scored.append((score, a))
+            scored.sort(key=lambda z: (z[0], z[1].created_ts), reverse=True)
