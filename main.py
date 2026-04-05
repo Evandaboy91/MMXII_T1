@@ -468,3 +468,50 @@ class ProtocolLedger:
         m = self._markets[market_id]
         for b in self._bets.values():
             if b.market_id != market_id or b.settled: continue
+            a = self._actors[b.actor_id]
+            a.locked -= b.stake; a.balance += b.stake
+            self._treasury -= b.protocol_fee_paid
+            self._creator_earnings[m.created_by] = self._creator_earnings.get(m.created_by, 0) - b.creator_fee_paid
+            b.settled = True; b.payout = b.stake
+            self._emit("BET_REFUNDED", b.actor_id, market_id, {"bet_id": b.bet_id, "amount": b.stake, "reason": reason[:140]})
+
+    def _payout_all(self, market_id: str, outcome: Side) -> None:
+        m = self._markets[market_id]
+        yes_pool = max(1, m.yes_pool); no_pool = max(1, m.no_pool)
+        lose_pool = (no_pool if outcome is Side.YES else yes_pool)
+        house_skim = min(int(0.0075 * (yes_pool + no_pool)), max(0, int(0.35 * lose_pool)))
+        self._treasury += house_skim
+        distributable = max(0, lose_pool - house_skim)
+        winners = [b for b in self._bets.values() if b.market_id == market_id and (not b.settled) and b.side is outcome]
+        if not winners:
+            for b in self._bets.values():
+                if b.market_id != market_id or b.settled: continue
+                a = self._actors[b.actor_id]; a.locked -= b.stake
+                b.settled = True; b.payout = 0
+                self._emit("BET_LOST", b.actor_id, market_id, {"bet_id": b.bet_id, "stake": b.stake})
+            return
+        # single pass denom to avoid per-bet recomputation
+        denom = 0
+        weights: dict[str, int] = {}
+        for w in winners:
+            wa = self._actors[w.actor_id]
+            alpha = 0.92 + 0.06 * _clamp(wa.reputation, 0.0, 1.0)
+            q = int((w.stake ** alpha) * 1_000_000)
+            weights[w.bet_id] = q
+            denom += q
+        denom = max(1, denom)
+        for b in self._bets.values():
+            if b.market_id != market_id or b.settled: continue
+            a = self._actors[b.actor_id]; a.locked -= b.stake
+            if b.side is outcome:
+                share = (distributable * weights.get(b.bet_id, 0)) // denom
+                payout = b.stake + int(share)
+                a.balance += payout
+                b.payout = payout; b.settled = True
+                a.reputation = _clamp(a.reputation + 0.015, 0.0, 1.0)
+                a.suspicion = _clamp(a.suspicion * 0.985, 0.0, 1.0)
+                self._emit("BET_WON", b.actor_id, market_id, {"bet_id": b.bet_id, "payout": payout, "stake": b.stake})
+            else:
+                b.payout = 0; b.settled = True
+                chase = 1.0 if b.stake > int(0.18 * (a.balance + 1)) else 0.0
+                a.suspicion = _clamp(a.suspicion + 0.010 + 0.006 * chase, 0.0, 1.0)
