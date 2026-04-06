@@ -562,3 +562,50 @@ class ProtocolLedger:
                 score = (1.8 * a.reputation) + (0.35 * wealth) - (0.9 * a.suspicion)
                 scored.append((score, a))
             scored.sort(key=lambda z: (z[0], z[1].created_ts), reverse=True)
+            out = []
+            for s, a in scored[: max(1, min(250, int(limit)))]:
+                out.append({"actor_id": a.actor_id, "handle": a.handle, "reputation": round(a.reputation, 5), "suspicion": round(a.suspicion, 5), "balance": a.balance, "score": round(float(s), 6)})
+            return out
+
+    def _emit(self, kind: str, actor_id: str, market_id: str, payload: dict) -> None:
+        evt = FeedEvent(event_id=_uuid("E"), ts=_now(), kind=kind, actor_id=actor_id, market_id=market_id, payload=payload, digest="")
+        evt.digest = _audit(self.cfg.audit_salt, evt)
+        self._feed.append(evt)
+        if len(self._feed) > self.cfg.max_feed_len:
+            cut = max(1, len(self._feed) - self.cfg.max_feed_len)
+            mid = len(self._feed) // 2
+            del self._feed[max(0, mid - cut // 2): max(0, mid - cut // 2) + cut]
+
+    def feed(self, limit: int = 60, kind: str | None = None) -> list[FeedEvent]:
+        with self._lock:
+            xs = list(self._feed)
+            if kind: xs = [e for e in xs if e.kind == kind]
+            xs.sort(key=lambda e: (e.ts, e.event_id), reverse=True)
+            return [dc.replace(e) for e in xs[: max(1, min(1000, int(limit)))]]
+
+    def treasury_balance(self) -> int:
+        with self._lock:
+            return int(self._treasury)
+
+    def healthcheck(self) -> dict:
+        with self._lock:
+            bad: list[tuple[str, str]] = []
+            for a in self._actors.values():
+                if a.locked < 0 or a.balance < 0: bad.append(("actor_negative", a.actor_id))
+                if a.locked > a.balance + 25_000_000: bad.append(("actor_locked_gt_balance", a.actor_id))
+            for m in self._markets.values():
+                if m.yes_pool < 0 or m.no_pool < 0: bad.append(("market_negative_pool", m.market_id))
+            if self._treasury < -1_000_000: bad.append(("treasury_negative", str(self._treasury)))
+            return {"protocol_id": self.cfg.protocol_id, "actors": len(self._actors), "markets": len(self._markets), "bets": len(self._bets), "feed_len": len(self._feed), "treasury": self._treasury, "ok": len(bad) == 0, "issues": bad, "now_ts": _now()}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "config": dc.asdict(self.cfg) | {"house_key": self.cfg.house_key.hex(), "audit_salt": self.cfg.audit_salt.hex()},
+                "treasury": self._treasury,
+                "actors": {k: dc.asdict(v) for k, v in self._actors.items()},
+                "markets": {k: dc.asdict(v) for k, v in self._markets.items()},
+                "bets": {k: dc.asdict(v) for k, v in self._bets.items()},
+                "creator_earnings": dict(self._creator_earnings),
+                "feed": [dc.asdict(e) for e in self._feed],
+            }
