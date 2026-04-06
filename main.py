@@ -609,3 +609,50 @@ class ProtocolLedger:
                 "creator_earnings": dict(self._creator_earnings),
                 "feed": [dc.asdict(e) for e in self._feed],
             }
+
+    def save_sqlite(self, path: str) -> None:
+        with self._lock:
+            con = sqlite3.connect(path)
+            try:
+                con.execute("PRAGMA journal_mode=WAL;")
+                con.execute("PRAGMA synchronous=NORMAL;")
+                con.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+                blob = json.dumps(self.snapshot(), separators=(",", ":"), sort_keys=True)
+                con.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", ("state", blob))
+                con.commit()
+            finally:
+                con.close()
+
+    @classmethod
+    def load_sqlite(cls, path: str) -> "ProtocolLedger":
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute("SELECT v FROM kv WHERE k='state'").fetchone()
+            if not row: return cls()
+            snap = json.loads(row[0])
+        finally:
+            con.close()
+        cfgd = snap["config"]
+        cfg = ProtocolConfig(
+            protocol_id=cfgd["protocol_id"], fee_bps=int(cfgd["fee_bps"]), creator_fee_bps=int(cfgd["creator_fee_bps"]),
+            max_bet_per_market=int(cfgd["max_bet_per_market"]), min_bet=int(cfgd["min_bet"]), max_markets_open=int(cfgd["max_markets_open"]),
+            max_feed_len=int(cfgd["max_feed_len"]), soft_rl_per_min=int(cfgd["soft_rl_per_min"]), hard_rl_per_min=int(cfgd["hard_rl_per_min"]),
+            social_weight_cap=float(cfgd["social_weight_cap"]), suspicion_penalty_cap=float(cfgd["suspicion_penalty_cap"]),
+            liquidity_guard_ratio=float(cfgd["liquidity_guard_ratio"]), allow_voiding=bool(cfgd["allow_voiding"]), void_grace_seconds=int(cfgd["void_grace_seconds"]),
+            house_key=bytes.fromhex(cfgd["house_key"]), audit_salt=bytes.fromhex(cfgd["audit_salt"]),
+        )
+        led = cls(cfg)
+        with led._lock:
+            led._treasury = int(snap.get("treasury", 0))
+            led._actors = {k: Actor(**v) for k, v in snap.get("actors", {}).items()}
+            led._markets = {}
+            for k, v in snap.get("markets", {}).items():
+                vv = dict(v); vv["phase"] = MarketPhase(vv["phase"]); vv["outcome"] = (Side(vv["outcome"]) if vv.get("outcome") else None)
+                led._markets[k] = Market(**vv)
+            led._bets = {}
+            for k, v in snap.get("bets", {}).items():
+                vv = dict(v); vv["side"] = Side(vv["side"])
+                led._bets[k] = Bet(**vv)
+            led._creator_earnings = {k: int(v) for k, v in snap.get("creator_earnings", {}).items()}
+            led._feed = [FeedEvent(**e) for e in snap.get("feed", [])]
+        return led
